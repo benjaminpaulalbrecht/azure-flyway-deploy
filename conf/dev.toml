@@ -1,0 +1,7 @@
+[environments.build] 
+buidl_vars=go_here 
+
+
+[flyway] 
+environments=build 
+
