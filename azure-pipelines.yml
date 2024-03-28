@@ -1,0 +1,119 @@
+---
+
+- name: azure-piplines example
+
+# trigger pipeline
+trigger: none
+
+name: test pipeline $(Date:yyyyMMdd).$(Rev:r)
+
+# stage: build
+stages:
+  - stage: build
+    variables:
+    - template: vars.yml
+    - group: build_vars.yml
+
+      # License information (typically pulled from redgate_global_vars)
+    - name: fw_key
+      value: $[variables.FLYWAY_LICENSE_KEY]
+
+      # Configuration information
+      # There is alot of value with using the toml-based configuration file
+      # to store information. Potential use cases:
+      # - Undo/Hotfix: targeting specific files to undo without resorting  to a cherry pick
+      # - Environments for multistage pipelines: specifying the databases used to targeting and versioning in different environments
+
+      # conf naming scheme: <STG>_conf
+    - name: dev_conf
+      value: $(Build.SourcesDirectory)/conf/dev.toml
+
+    # while not the best way to reference an azure pool, this works? 
+    pool: build_pool
+
+    # build stage workflow:
+    # - get the version data from flyway (info)
+    # - perform build (check changes)
+    # - perform migration (migrate)
+    # - get version data after migration
+    # upload artifacts from build to drop
+
+    jobs:
+      - job: Build 
+        displayName: "Info (Before)"
+        steps:
+        - task: Powershell@2 
+          inputs:
+            targetType: 'filePath'
+            filePath: 'dev/Info.ps1'
+            arguments: -RootPath $(Build.SourcesDirectory) -License "$(fw_key)" -Config $(conf) -MigrationFolder '$(Build.SourcesDirectory)/migrations'
+
+        - task: Powershell@2
+          displayName: "Check Changes (Build" 
+          inputs:
+            targetType: 'filePath'
+            filePath: 'scripts/build.ps1'
+            arguments: -RootPath $(Build.SourcesDirectory) -License "$(fw_key)" -Config $(conf) -MigrationFolder '$(Build.SourcesDirectory)/migrations'
+
+        - task: Powershell@2
+          displayName: "Migrate"
+          inputs:
+            targetType: 'filePath'
+            filePath: 'migrate.ps1'
+            arguments: -RootPath $(Build.SourcesDirectory) -License "$(fw_key)" -Config $(conf) -MigrationFolder '$(Build.SourcesDirectory)/migrations'
+
+        - task: Powershell@2
+          displayName: 'Info (Post Migration)' 
+          inputs:
+            targetType: 'filePath'
+            filePath: 'info.ps1'
+            arguments: -RootPath $(Build.SourcesDirectory) -License "$(fw_key)" -Config $(conf) -MigrationFolder '$(Build.SourcesDirectory)/migrations'
+
+
+        - task: PublishArtifact@1
+          displayName: 'Publish Artifacts' 
+          inputs:
+            PathToPublish: '$(Build.SourcesDirectory)'
+            ArtifactName: 'drop'
+            publishLocation: 'Container'
+
+# normally, in a non-dev environment, you would might want a manual intervention step 
+
+- stage: DEV
+  jobs:
+
+    - deployment: env_user_release
+      displayName: 'DEV env release'
+      workspace:
+        clean: all
+      continueOnError: false
+
+      variables:
+      - template: vars-nocreds.yml
+      - group: redgate_deploy_credentials
+      pool:
+        vmImage: server
+      environment: flyway-user
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - task: DownloadPipelineArtifacts@2
+                inputs:
+                  artifact: drop
+                  targetPath: $(Pipline.Workspace)
+
+              - task: Powershell@2
+                displayName: 'migrate'
+                inputs:
+                  targetType: filePath
+                  filePath: '$(Pipleine.Workspace)/migrate.ps1'
+                  arguments -RootPath '$(Pipeline.Workspace)' -License "$(fw_key)" -Config $(conf) -MigrationFolder '$(Pipeline.Workspace)/migrations'
+
+             - task: Powershell@2
+               displayName: 'Info (After)'
+               inputs:
+                 targetType: 'filePath'
+                 arguments: -RootPath $(Build.SourcesDirectory) -License "$(fw_key)" -Config $(conf) -MigrationFolder '$(Build.SourcesDirectory)/migrations'
+
+...
